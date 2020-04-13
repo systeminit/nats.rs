@@ -1,13 +1,12 @@
 use std::{
     collections::HashMap,
     io::{self, BufWriter, Error, ErrorKind, Write},
-    net::{Shutdown, TcpStream},
     sync::atomic::{AtomicBool, Ordering},
 };
 
 use parking_lot::{Condvar, Mutex};
 
-use crate::SubscriptionState;
+use crate::{Stream, SubscriptionState};
 
 #[derive(Debug)]
 struct DisconnectBuffer {
@@ -26,7 +25,7 @@ impl DisconnectBuffer {
 
 #[derive(Debug)]
 enum Buffer {
-    Connected(BufWriter<TcpStream>),
+    Connected(BufWriter<Stream>),
     Disconnected(DisconnectBuffer),
 }
 
@@ -69,7 +68,7 @@ impl Buffer {
     // If the state was `Disconnected`, we will also try
     // to write and flush the entire disconnect buffer into
     // the new socket.
-    fn replace_stream(&mut self, stream: TcpStream) -> io::Result<()> {
+    fn replace_stream(&mut self, stream: Stream) -> io::Result<()> {
         match self {
             Buffer::Connected(ref mut bw) => {
                 *(bw.get_mut()) = stream;
@@ -87,7 +86,7 @@ impl Buffer {
 
     fn shutdown(&mut self) -> io::Result<()> {
         if let Buffer::Connected(bw) = self {
-            bw.get_mut().shutdown(Shutdown::Both)?;
+            bw.get_mut().shutdown()?;
         }
         Ok(())
     }
@@ -101,7 +100,7 @@ pub(crate) struct Outbound {
 }
 
 impl Outbound {
-    pub(crate) fn new(stream: TcpStream) -> Outbound {
+    pub(crate) fn new(stream: Stream) -> Outbound {
         Outbound {
             writer: Mutex::new(Buffer::Connected(BufWriter::with_capacity(
                 64 * 1024,
@@ -136,7 +135,7 @@ impl Outbound {
         }
     }
 
-    pub(crate) fn replace_stream(&self, new_stream: TcpStream) -> io::Result<()> {
+    pub(crate) fn replace_stream(&self, new_stream: Stream) -> io::Result<()> {
         let mut writer = self.writer.lock();
         writer.replace_stream(new_stream)?;
         drop(writer);

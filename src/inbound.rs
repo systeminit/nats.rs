@@ -8,12 +8,12 @@ use rand::{seq::SliceRandom, thread_rng};
 
 use crate::{
     parser::{parse_control_op, ControlOp, MsgArgs},
-    ConnectionStatus, Message, Server, ServerInfo, SharedState, SubscriptionState,
+    ConnectionStatus, Message, Server, ServerInfo, SharedState, Stream, SubscriptionState,
 };
 
 #[derive(Debug)]
 pub(crate) struct Inbound {
-    pub(crate) inbound: BufReader<TcpStream>,
+    pub(crate) inbound: BufReader<Stream>,
     pub(crate) configured_servers: Vec<Server>,
     pub(crate) learned_servers: Vec<Server>,
     pub(crate) shared_state: Arc<SharedState>,
@@ -107,7 +107,7 @@ impl Inbound {
                     // replace our inbound and writer to correspond with the new socket
                     self.inbound = inbound;
                     self.info = info;
-                    let stream: TcpStream = self.inbound.get_mut().try_clone().unwrap();
+                    let stream = self.inbound.get_mut().try_clone().unwrap();
                     if self.shared_state.outbound.replace_stream(stream).is_err() {
                         // record retry stats
                         server.reconnects = server.reconnects.overflowing_add(1).0;

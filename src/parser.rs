@@ -1,6 +1,5 @@
 use std::{
     io::{self, BufRead, BufReader, Error, ErrorKind},
-    net::TcpStream,
     str::FromStr,
 };
 
@@ -13,7 +12,7 @@ use nom::{
     IResult,
 };
 
-use crate::ServerInfo;
+use crate::{ServerInfo, Stream};
 
 // Protocol
 const INFO: &[u8] = b"INFO";
@@ -114,7 +113,7 @@ fn parse_err(args: &[u8]) -> ControlOp {
     ControlOp::Err(err_description.to_string())
 }
 
-pub(crate) fn expect_info(reader: &mut BufReader<TcpStream>) -> io::Result<ServerInfo> {
+pub(crate) fn expect_info(reader: &mut BufReader<Stream>) -> io::Result<ServerInfo> {
     let op = parse_control_op(reader)?;
 
     if let ControlOp::Info(info) = op {
@@ -123,6 +122,48 @@ pub(crate) fn expect_info(reader: &mut BufReader<TcpStream>) -> io::Result<Serve
         Err(Error::new(ErrorKind::Other, "INFO proto not found"))
     }
 }
+
+/*
+// This takes a TcpStream instead of a buffered reader because
+// we may need to
+pub(crate) fn expect_info(stream: &mut TcpStream) -> io::Result<ServerInfo> {
+    fn read_line(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+        fn ends_with_crlf(buf: &[u8]) -> bool {
+            buf.len() >= 2 && buf[buf.len() - 2] == b'\r' && buf[buf.len() - 1] == b'\n'
+        }
+
+        let mut buf = vec![];
+        while !ends_with_crlf(&buf) {
+            let mut read_buf = [0];
+            if 1 == stream.read(&mut read_buf)? {
+                buf.push(read_buf[0]);
+            } else {
+                break;
+            }
+        }
+        if buf.len() <= 2 {
+            return Err(Error::new(ErrorKind::UnexpectedEof, "socket closed"));
+        }
+        assert_eq!(buf.pop().unwrap(), b'\n');
+        assert_eq!(buf.pop().unwrap(), b'\r');
+        Ok(buf)
+    }
+
+    let line = read_line(stream)?;
+
+    if line.starts_with(b"INFO ") {
+        Ok(serde_json::from_slice(&line["INFO ".len()..])?)
+    } else {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "expected INFO block but received {}",
+                String::from_utf8(line).unwrap_or_else(|_| "invalid data".to_string())
+            ),
+        ));
+    }
+}
+*/
 
 const CRLF: &str = "\r\n";
 
