@@ -157,8 +157,8 @@ fn authenticate(
         }
         AuthStyle::Credentials(path) => {
             let (jwt, signature) = read_jwt_and_sign(&path, server_info.nonce.into())?;
-            connect_info.user_jwt = Some(jwt);
-            connect_info.signature = Some(signature);
+            connect_info.user_jwt = Some(jwt.into());
+            connect_info.signature = Some(signature.into());
         }
         AuthStyle::None => {}
     }
