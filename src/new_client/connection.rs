@@ -1,16 +1,14 @@
 use std::io::{self, Error, ErrorKind};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use async_mutex::Mutex;
-use futures::channel::{mpsc, oneshot};
-use smol::block_on;
+use blocking::block_on;
+use futures::channel::oneshot;
 
 use crate::inject_delay;
-use crate::new_client::client::{self, UserOp};
-use crate::new_client::encoder::{encode, ClientOp};
+use crate::new_client::client;
 use crate::new_client::message::Message;
 use crate::new_client::options::{ConnectionOptions, Options};
 use crate::new_client::subscription::Subscription;
@@ -18,12 +16,6 @@ use crate::new_client::writer::Writer;
 
 /// A NATS client connection.
 pub struct Connection {
-    /// Enqueues user operations.
-    user_ops: mpsc::UnboundedSender<UserOp>,
-
-    /// Subscription ID generator.
-    sid_gen: AtomicUsize,
-
     writer: Arc<Mutex<Writer>>,
 
     /// Thread running the main future.
@@ -36,15 +28,12 @@ pub struct Connection {
 impl Connection {
     pub(crate) fn connect_with_options(url: &str, options: Options) -> io::Result<Connection> {
         // Spawn a client thread.
-        let (sender, receiver) = mpsc::unbounded();
         // TODO(stjepang): make this constant configurable
         let writer = Arc::new(Mutex::new(Writer::new(8 * 1024 * 1024)));
-        let (thread, close_signal) = client::spawn(url, options, receiver, writer.clone());
+        let (thread, close_signal) = client::spawn(url, options, writer.clone());
 
         // Connection handle controlling the client thread.
         let conn = Connection {
-            user_ops: sender,
-            sid_gen: AtomicUsize::new(1),
             writer,
             thread: Some(thread),
             close_signal: Some(close_signal),
@@ -64,27 +53,15 @@ impl Connection {
 
     /// Publishes a message.
     pub fn publish(&self, subject: &str, msg: impl AsRef<[u8]>) -> io::Result<()> {
-        let payload = msg.as_ref();
-        let reply_to = None;
+        // Inject random delays when testing.
+        inject_delay();
 
         block_on(async {
-            // Inject random delays when testing.
-            inject_delay();
-
-            let mut writer = self.writer.lock().await;
-
-            encode(
-                &mut *writer,
-                ClientOp::Pub {
-                    subject,
-                    reply_to,
-                    payload,
-                },
-            )
-            .await?;
-
-            writer.commit();
-            Ok(())
+            self.writer
+                .lock()
+                .await
+                .publish(subject, None, msg.as_ref())
+                .await
         })
     }
 
@@ -109,9 +86,10 @@ impl Connection {
     ) -> io::Result<Option<Message>> {
         // Publish a request.
         let mut sub = self.prepare_request(subject, msg)?;
+        println!("PREPARED");
 
         // Wait for the response.
-        sub.next_timeout(timeout)
+        dbg!(sub.next_timeout(timeout))
     }
 
     fn prepare_request(&self, subject: &str, msg: impl AsRef<[u8]>) -> io::Result<Subscription> {
@@ -121,45 +99,37 @@ impl Connection {
         let payload = msg.as_ref();
         let reply_to = Some(reply_to.as_str());
 
+        // Inject random delays when testing.
+        inject_delay();
+
         block_on(async {
-            // Inject random delays when testing.
-            inject_delay();
-
-            let mut writer = self.writer.lock().await;
-
-            encode(
-                &mut *writer,
-                ClientOp::Pub {
-                    subject,
-                    reply_to,
-                    payload,
-                },
-            )
-            .await?;
-
-            writer.commit();
+            self.writer
+                .lock()
+                .await
+                .publish(subject, reply_to, payload)
+                .await?;
             Ok(sub)
         })
     }
 
     /// Creates a new subscriber.
     pub fn subscribe(&self, subject: &str) -> io::Result<Subscription> {
-        let sid = self.sid_gen.fetch_add(1, Ordering::SeqCst);
-        let sub = Subscription::new(subject, sid, self.user_ops.clone());
+        // Inject random delays when testing.
+        inject_delay();
+
+        let (sid, receiver) =
+            block_on(async { self.writer.lock().await.subscribe(subject, None).await })?;
 
         self.flush()?;
-        Ok(sub)
+        Ok(Subscription::new(sid, receiver, self.writer.clone()))
     }
 
     /// Flushes by performing a round trip to the server.
     pub fn flush(&self) -> io::Result<()> {
-        let pong = block_on(async {
-            // Inject random delays when testing.
-            inject_delay();
+        // Inject random delays when testing.
+        inject_delay();
 
-            let mut writer = self.writer.lock().await;
-            writer.ping().await
-        })?;
+        let pong = block_on(async { self.writer.lock().await.ping().await })?;
 
         // Wait until the PONG operation is received.
         match block_on(pong) {

@@ -317,6 +317,7 @@ fn reconnect_test() {
             let mut received = 0;
 
             while received < EXPECTED_SUCCESSES && !shutdown.load(Ordering::Acquire) {
+                println!("BEFORE");
                 if nc
                     .request_timeout(
                         "rust.tests.faulty_requests",
@@ -329,6 +330,7 @@ fn reconnect_test() {
                 } else {
                     log::debug!("timed out before we received a response :(");
                 }
+                println!("AFTER");
             }
 
             if received == EXPECTED_SUCCESSES {
@@ -344,7 +346,7 @@ fn reconnect_test() {
     };
 
     while !success.load(Ordering::Acquire) {
-        while let Ok(Some(mut msg)) = subscriber.next_timeout(Duration::from_millis(10)) {
+        while let Ok(Some(mut msg)) = dbg!(subscriber.next_timeout(Duration::from_millis(10))) {
             let _unchecked = msg.respond("Anything for the story");
         }
     }

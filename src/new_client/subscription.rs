@@ -1,47 +1,40 @@
+use std::fmt;
 use std::io::{self, ErrorKind};
+use std::sync::Arc;
 use std::time::Duration;
 
+use async_mutex::Mutex;
+use blocking::block_on;
 use futures::channel::mpsc;
 use futures::prelude::*;
-use smol::{block_on, Timer};
+use smol::Timer;
 
-use crate::new_client::client::UserOp;
+use crate::inject_delay;
 use crate::new_client::message::Message;
+use crate::new_client::writer::Writer;
 
 /// A subscription to a subject.
-#[derive(Debug)]
 pub struct Subscription {
     /// Subscription ID.
-    sid: usize,
+    sid: u64,
 
     /// MSG operations received from the server.
     messages: mpsc::UnboundedReceiver<Message>,
 
-    /// Enqueues user operations.
-    user_ops: mpsc::UnboundedSender<UserOp>,
+    writer: Arc<Mutex<Writer>>,
 }
 
 impl Subscription {
     /// Creates a subscription.
     pub(crate) fn new(
-        subject: &str,
-        sid: usize,
-        user_ops: mpsc::UnboundedSender<UserOp>,
+        sid: u64,
+        messages: mpsc::UnboundedReceiver<Message>,
+        writer: Arc<Mutex<Writer>>,
     ) -> Subscription {
-        let (msg_sender, msg_receiver) = mpsc::unbounded();
-
-        // Enqueue a SUB operation.
-        let _ = user_ops.unbounded_send(UserOp::Sub {
-            subject: subject.to_string(),
-            queue_group: None,
-            sid,
-            messages: msg_sender,
-        });
-
         Subscription {
             sid,
-            messages: msg_receiver,
-            user_ops,
+            messages,
+            writer,
         }
     }
 
@@ -70,10 +63,20 @@ impl Subscription {
 
 impl Drop for Subscription {
     fn drop(&mut self) {
-        // Enqueue an UNSUB operation.
-        let _ = self.user_ops.unbounded_send(UserOp::Unsub {
-            sid: self.sid,
-            max_msgs: None,
+        // Inject random delays when testing.
+        inject_delay();
+
+        // Send an UNSUB operation to the server.
+        block_on(async {
+            let mut writer = self.writer.lock().await;
+            let _ = writer.unsubscribe(self.sid).await;
         });
+    }
+}
+
+impl fmt::Debug for Subscription {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        // TODO(stjepang): fill out fields
+        write!(f, "Subscription")
     }
 }

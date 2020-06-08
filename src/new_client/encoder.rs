@@ -4,7 +4,7 @@ use std::io;
 
 use futures::prelude::*;
 
-use crate::{connect::ConnectInfo, inject_io_failure};
+use crate::connect::ConnectInfo;
 
 /// A protocol operation sent by the client.
 #[derive(Debug)]
@@ -21,13 +21,13 @@ pub(crate) enum ClientOp<'a> {
 
     /// `SUB <subject> [queue group] <sid>\r\n`
     Sub {
-        subject: String,
-        queue_group: Option<String>,
-        sid: usize,
+        subject: &'a str,
+        queue_group: Option<&'a str>,
+        sid: u64,
     },
 
     /// `UNSUB <sid> [max_msgs]`
-    Unsub { sid: usize, max_msgs: Option<u64> },
+    Unsub { sid: u64, max_msgs: Option<u64> },
 
     /// `PING`
     Ping,
@@ -41,8 +41,7 @@ pub(crate) async fn encode(
     mut stream: impl AsyncWrite + Unpin,
     op: ClientOp<'_>,
 ) -> io::Result<()> {
-    // Inject random I/O failures when testing.
-    inject_io_failure()?;
+    dbg!(&op);
 
     match &op {
         ClientOp::Connect(connect_info) => {
@@ -65,7 +64,9 @@ pub(crate) async fn encode(
             }
 
             let mut buf = itoa::Buffer::new();
-            stream.write_all(buf.format(payload.len()).as_bytes()).await?;
+            stream
+                .write_all(buf.format(payload.len()).as_bytes())
+                .await?;
             stream.write_all(b"\r\n").await?;
 
             stream.write_all(payload).await?;

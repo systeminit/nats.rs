@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use async_mutex::Mutex;
 use futures::{
-    channel::{mpsc, oneshot},
+    channel::oneshot,
     io::{BufReader, BufWriter},
     prelude::*,
 };
@@ -18,64 +18,38 @@ use smol::{Async, Timer};
 
 use crate::new_client::decoder::{decode, ServerOp};
 use crate::new_client::encoder::{encode, ClientOp};
-use crate::new_client::message::Message;
 use crate::new_client::options::{AuthStyle, Options};
 use crate::new_client::server::Server;
 use crate::new_client::writer::Writer;
 use crate::secure_wipe::SecureString;
 use crate::{connect::ConnectInfo, inject_delay, inject_io_failure, ServerInfo};
 
-/// An operation enqueued by the user of this crate.
-///
-/// These operations are enqueued by `Connection` or `Subscription` and are then handled by the
-/// client thread.
-#[derive(Debug)]
-pub(crate) enum UserOp {
-    /// Subscribe to a subject.
-    Sub {
-        subject: String,
-        queue_group: Option<String>,
-        sid: usize,
-        messages: mpsc::UnboundedSender<Message>,
-    },
-
-    /// Unsubscribe from a subject.
-    Unsub { sid: usize, max_msgs: Option<u64> },
-}
-
 /// Spawns a client thread.
 pub(crate) fn spawn(
     url: &str,
     options: Options,
-    user_ops: mpsc::UnboundedReceiver<UserOp>,
     writer: Arc<Mutex<Writer>>,
 ) -> (JoinHandle<io::Result<()>>, oneshot::Sender<()>) {
     let url = url.to_string();
     let (s, r) = oneshot::channel();
     let t = thread::spawn(move || {
         // TODO(stjepang): Make panics in the client thread louder.
-        smol::run(async move {
+        dbg!(smol::run(async move {
             loop {
                 futures::select! {
-                    res = connect_loop(&url, options, user_ops, writer).fuse() => break res,
-                    _ = r.fuse() => break Ok(()),
+                    res = connect_loop(&url, options, writer).fuse() => break res,
+                    _ = r.fuse() => {
+                        break Ok(());
+                    }
                 }
             }
-        })
+        }))
     });
     (t, s)
 }
 
 /// Runs the loop that connects and reconnects the client.
-async fn connect_loop(
-    urls: &str,
-    options: Options,
-    mut user_ops: mpsc::UnboundedReceiver<UserOp>,
-    writer: Arc<Mutex<Writer>>,
-) -> io::Result<()> {
-    // Current subscriptions in the form `(subject, sid, messages)`.
-    let mut subscriptions: Vec<(String, usize, mpsc::UnboundedSender<Message>)> = Vec::new();
-
+async fn connect_loop(urls: &str, options: Options, writer: Arc<Mutex<Writer>>) -> io::Result<()> {
     // Server table in the form `(server, reconnects)`.
     let mut server_reconnects: HashMap<Server, usize> = HashMap::new();
 
@@ -135,13 +109,7 @@ async fn connect_loop(
                 }
                 .and_then(|()| {
                     // Connected! Now run the client loop.
-                    client_loop(
-                        writer.clone(),
-                        server_ops,
-                        &mut user_ops,
-                        &mut subscriptions,
-                        &mut server_info,
-                    )
+                    client_loop(writer.clone(), server_ops, &mut server_info)
                 })
                 .await;
 
@@ -334,8 +302,6 @@ async fn try_connect(
 async fn client_loop<'a>(
     writer: Arc<Mutex<Writer>>,
     mut server_ops: impl Stream<Item = io::Result<ServerOp>> + Unpin + 'a,
-    user_ops: &'a mut mpsc::UnboundedReceiver<UserOp>,
-    subscriptions: &'a mut Vec<(String, usize, mpsc::UnboundedSender<Message>)>,
     server_info: &'a mut ServerInfo,
 ) -> io::Result<()> {
     // TODO(stjepang): Make this option configurable.
@@ -343,23 +309,6 @@ async fn client_loop<'a>(
 
     // Bytes written to the server are buffered and periodically flushed.
     let mut next_flush = Instant::now() + flush_timeout;
-
-    // Restart subscriptions that existed before the last reconnect.
-    for (subject, sid, _messages) in subscriptions.iter() {
-        // Inject random delays when testing.
-        inject_delay();
-
-        // Send a SUB operation to the server.
-        encode(
-            &mut *writer.lock().await,
-            ClientOp::Sub {
-                subject: subject.clone(),
-                queue_group: None, // TODO(stjepang): Use actual queue group here.
-                sid: *sid,
-            },
-        )
-        .await?;
-    }
 
     // Handle events in a loop.
     loop {
@@ -382,32 +331,24 @@ async fn client_loop<'a>(
                         inject_delay();
 
                         // Send a PONG operation to the server.
-                        encode(
-                            &mut *writer.lock().await,
-                            ClientOp::Pong,
-                        ).await?;
+                        let mut writer = writer.lock().await;
+                        if let Some(w) = writer.stream.as_mut() {
+                            encode(w, ClientOp::Pong).await?;
+                        }
                     }
 
                     ServerOp::Pong => {
                         // Inject random delays when testing.
                         inject_delay();
 
-                        let mut writer = writer.lock().await;
-                        writer.pong();
+                        writer.lock().await.pong();
                     }
 
                     ServerOp::Msg { subject, sid, reply_to, payload } => {
-                        // Send the message to matching subscriptions.
-                        for (_, _, messages) in
-                            subscriptions.iter().filter(|(_, s, _)| *s == sid)
-                        {
-                            let _ = messages.unbounded_send(Message {
-                                subject: subject.clone(),
-                                reply: reply_to.clone(),
-                                data: payload.clone(),
-                                writer: None,
-                            });
-                        }
+                        // Inject random delays when testing.
+                        inject_delay();
+
+                        writer.lock().await.message(subject, sid, reply_to, payload);
                     }
 
                     ServerOp::Err(msg) => {
@@ -420,57 +361,13 @@ async fn client_loop<'a>(
                 }
             }
 
-            // The user has enqueued an operation.
-            msg = user_ops.next().fuse() => {
-                match msg.expect("user_ops disconnected") {
-                    UserOp::Sub { subject, queue_group, sid, messages } => {
-                        // Add the subscription to the list.
-                        subscriptions.push((subject.clone(), sid, messages));
-
-                        // Inject random delays when testing.
-                        inject_delay();
-
-                        // Send a SUB operation to the server.
-                        let mut writer = writer.lock().await;
-                        encode(
-                            &mut *writer,
-                            ClientOp::Sub {
-                                subject,
-                                queue_group,
-                                sid,
-                            },
-                        )
-                        .await?;
-                    }
-
-                    UserOp::Unsub { sid, max_msgs } => {
-                        // Remove the subscription from the list.
-                        subscriptions.retain(|(_, s, _)| *s != sid);
-
-                        // Inject random delays when testing.
-                        inject_delay();
-
-                        // Send an UNSUB operation to the server.
-                        let mut writer = writer.lock().await;
-                        encode(
-                            &mut *writer,
-                            ClientOp::Unsub {
-                                sid,
-                                max_msgs,
-                            },
-                        )
-                        .await?;
-                    }
-                }
-            }
-
             // Periodically flush writes to the server.
             _ = Timer::at(next_flush).fuse() => {
                 // Inject random delays when testing.
                 inject_delay();
 
-                let mut writer = writer.lock().await;
-                writer.flush().await?;
+                writer.lock().await.flush().await?;
+
                 next_flush = Instant::now() + flush_timeout;
             }
         }

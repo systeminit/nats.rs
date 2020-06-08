@@ -21,13 +21,13 @@ fn main() -> io::Result<()> {
     
     let mut i = 1;
     loop {
-        println!("publish {}", i);
-        dbg!(nc.publish("hello", format!("msg {}", i)));
-        i += 1;
-        thread::sleep(Duration::from_secs(1));
+        // println!("publish {}", i);
+        // dbg!(nc.publish("hello", format!("msg {}", i)));
+        // i += 1;
+        // thread::sleep(Duration::from_secs(1));
     
-        // let msg = dbg!(sub.next());
-        // println!("{:?}", msg);
+        let msg = dbg!(sub.next());
+        println!("{:?}", msg);
     }
 
     Ok(())

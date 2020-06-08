@@ -16,7 +16,7 @@ pub(crate) enum ServerOp {
     /// `MSG <subject> <sid> [reply-to] <#bytes>\r\n[payload]\r\n`
     Msg {
         subject: String,
-        sid: usize,
+        sid: u64,
         reply_to: Option<String>,
         payload: Vec<u8>,
     },
@@ -51,6 +51,7 @@ pub(crate) async fn decode(mut stream: impl AsyncBufRead + Unpin) -> io::Result<
     // Convert into a UTF8 string for simpler parsing.
     let line = String::from_utf8(line).map_err(|err| Error::new(ErrorKind::InvalidInput, err))?;
     let line_uppercase = line.trim().to_uppercase();
+    dbg!(&line);
 
     if line_uppercase.starts_with("PING") {
         return Ok(Some(ServerOp::Ping));
@@ -91,7 +92,7 @@ pub(crate) async fn decode(mut stream: impl AsyncBufRead + Unpin) -> io::Result<
         let subject = subject.to_string();
 
         // Parse the subject ID.
-        let sid = usize::from_str(sid).map_err(|_| {
+        let sid = u64::from_str(sid).map_err(|_| {
             Error::new(
                 ErrorKind::InvalidInput,
                 "cannot parse sid argument after MSG",
