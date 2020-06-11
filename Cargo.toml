@@ -1,7 +1,7 @@
 [package]
 name = "natsio"
 version = "0.4.0"
-description = "A Rust NATS client. Use nats crate instead (we moved there)."
+description = "Deprecated in favor of the nats crate"
 authors = ["Derek Collison <derek@nats.io>", "Tyler Neely <tyler@nats.io>", "Stjepan Glavina <stjepan@nats.io>"]
 edition = "2018"
 license = "Apache-2.0"
