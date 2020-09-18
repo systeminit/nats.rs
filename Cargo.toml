@@ -34,7 +34,7 @@ futures-lite = "1.3.0"
 itoa = "0.4.6"
 json = "0.12.4"
 log = "0.4.8"
-nkeys = "0.0.9"
+nkeys = { git = "https://github.com/systeminit/nkeys", branch = "upgrade-signatory" }
 nuid = "0.2.1"
 once_cell = "1.4.0"
 rand = "0.7.3"
