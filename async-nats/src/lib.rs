@@ -462,11 +462,16 @@ impl ConnectionHandler {
         }
     }
 
-    pub(crate) async fn process<'a>(&'a mut self, receiver: &'a mut mpsc::Receiver<Command>) {
+    pub(crate) async fn process<'a>(
+        &'a mut self,
+        receiver: &'a mut mpsc::Receiver<Command>,
+        reconnector: &'a mut mpsc::Receiver<()>,
+    ) {
         struct ProcessFut<'a> {
             handler: &'a mut ConnectionHandler,
             receiver: &'a mut mpsc::Receiver<Command>,
             recv_buf: &'a mut Vec<Command>,
+            reconnector: &'a mut mpsc::Receiver<()>,
         }
 
         enum ExitReason {
@@ -483,13 +488,19 @@ impl ConnectionHandler {
                 self.handler.pending_pings += 1;
 
                 if self.handler.pending_pings > MAX_PENDING_PINGS {
-                    debug!(
+                    tracing::info!(
+                        si.investigation = "verideath",
                         "pending pings {}, max pings {}. disconnecting",
-                        self.handler.pending_pings, MAX_PENDING_PINGS
+                        self.handler.pending_pings,
+                        MAX_PENDING_PINGS
                     );
 
                     Poll::Ready(ExitReason::Disconnected(None))
                 } else {
+                    tracing::info!(
+                        si.investigation = "verideath",
+                        "enqueing ping client operation"
+                    );
                     self.handler.connection.enqueue_write_op(&ClientOp::Ping);
 
                     Poll::Pending
@@ -566,7 +577,17 @@ impl ConnectionHandler {
                             recv_buf,
                             handler,
                             receiver,
+                            reconnector,
                         } = &mut *self;
+
+                        if let Poll::Ready(Some(())) = reconnector.poll_recv(cx) {
+                            tracing::info!(
+                                si.investigation.name = "verideath",
+                                "reconnect request received"
+                            );
+                            handler.should_reconnect = true;
+                        }
+
                         match receiver.poll_recv_many(cx, recv_buf, Self::RECV_CHUNK_SIZE) {
                             Poll::Pending => break,
                             Poll::Ready(1..) => {
@@ -640,14 +661,20 @@ impl ConnectionHandler {
             let process = ProcessFut {
                 handler: self,
                 receiver,
+                reconnector,
                 recv_buf: &mut recv_buf,
             };
             match process.await {
                 ExitReason::Disconnected(err) => {
                     debug!(?err, "disconnected");
+                    tracing::info!(si.investigation.name = "verideath", "handling disconnect");
                     if self.handle_disconnect().await.is_err() {
                         break;
                     };
+                    tracing::info!(
+                        si.investigation.name = "verideath",
+                        "reconnected after disconnect"
+                    );
                     debug!("reconnected");
                 }
                 ExitReason::Closed => {
@@ -656,7 +683,10 @@ impl ConnectionHandler {
                     break;
                 }
                 ExitReason::ReconnectRequested => {
-                    debug!("reconnect requested");
+                    tracing::info!(
+                        si.investigation.name = "verideath",
+                        "reconnect requested via exit received"
+                    );
                     // Should be ok to ingore error, as that means we are not in connected state.
                     self.connection.stream.shutdown().await.ok();
                     if self.handle_disconnect().await.is_err() {
@@ -675,7 +705,7 @@ impl ConnectionHandler {
                 self.connection.enqueue_write_op(&ClientOp::Pong);
             }
             ServerOp::Pong => {
-                debug!("received PONG");
+                tracing::info!(si.investigation.name = "verideath", "received PONG");
                 self.pending_pings = self.pending_pings.saturating_sub(1);
             }
             ServerOp::Error(error) => {
@@ -925,6 +955,7 @@ impl ConnectionHandler {
     }
 
     async fn handle_disconnect(&mut self) -> Result<(), ConnectError> {
+        tracing::info!(si.investigation.name = "verideath", "handle disconnect");
         self.pending_pings = 0;
         self.connector.events_tx.try_send(Event::Disconnected).ok();
         self.connector.state_tx.send(State::Disconnected).ok();
@@ -933,6 +964,7 @@ impl ConnectionHandler {
     }
 
     async fn handle_reconnect(&mut self) -> Result<(), ConnectError> {
+        tracing::info!(si.investigation.name = "verideath", "handle reconnect");
         let (info, connection) = self.connector.connect().await?;
         self.connection = connection;
         let _ = self.info_sender.send(info);
@@ -1024,6 +1056,7 @@ pub async fn connect_with_options<A: ToServerAddrs>(
 
     let (info_sender, info_watcher) = tokio::sync::watch::channel(info.clone());
     let (sender, mut receiver) = mpsc::channel(options.sender_capacity);
+    let (reconnector_tx, mut reconnector_rx) = mpsc::channel(1);
 
     let client = Client::new(
         info_watcher,
@@ -1034,6 +1067,7 @@ pub async fn connect_with_options<A: ToServerAddrs>(
         options.request_timeout,
         max_payload,
         statistics,
+        reconnector_tx,
     );
 
     task::spawn(async move {
@@ -1060,7 +1094,9 @@ pub async fn connect_with_options<A: ToServerAddrs>(
         let connection = connection.unwrap();
         let mut connection_handler =
             ConnectionHandler::new(connection, connector, info_sender, ping_period);
-        connection_handler.process(&mut receiver).await
+        connection_handler
+            .process(&mut receiver, &mut reconnector_rx)
+            .await
     });
 
     Ok(client)
