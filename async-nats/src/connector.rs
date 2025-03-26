@@ -138,7 +138,7 @@ impl Connector {
     }
 
     pub(crate) async fn try_connect(&mut self) -> Result<(ServerInfo, Connection), ConnectError> {
-        tracing::info!("running try connect");
+        tracing::info!(si.investigation.name = "verideath", "running try connect");
         let mut error = None;
 
         let mut servers = self.servers.clone();
@@ -159,9 +159,12 @@ impl Connector {
                 }
             }
 
-            tracing::info!("using reconnect delay callback to get duration");
+            tracing::info!(
+                si.investigation.name = "verideath",
+                "using reconnect delay callback to get duration"
+            );
             let duration = (self.options.reconnect_delay_callback)(self.attempts);
-            tracing::info!("got duration");
+            tracing::info!(si.investigation.name = "verideath", "got duration");
 
             sleep(duration).await;
 

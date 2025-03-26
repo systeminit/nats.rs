@@ -587,7 +587,10 @@ impl ConnectionHandler {
                         } = &mut *self;
 
                         if let Poll::Ready(Some(())) = reconnector.poll_recv(cx) {
-                            debug!("reconnect request received");
+                            tracing::info!(
+                                si.investigation.name = "verideath",
+                                "reconnect request received"
+                            );
                             handler.should_reconnect = true;
                         }
 
